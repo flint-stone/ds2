@@ -146,10 +146,10 @@ public class KeyedHighestBid {
         int batchSize = 1;
         int range = 4;
 
-        DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source")
+        DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
-                .rebalance()
-                .filter(x->x instanceof FunctionInvocation)
+                //.rebalance()
+                .filter(x->x instanceof FunctionInvocation).setParallelism(params.getInt("p1", 1))
                 .flatMap(new RichFlatMapFunction<InternalTypedSourceObject, Tuple2<String, Object>>() {
                     private GeneratorConfig config;
                     private long eventId;
@@ -218,8 +218,7 @@ public class KeyedHighestBid {
                             }
                         }
                     }
-                }).returns(new TypeHint<Tuple2<String, Object>>(){});
-        int finalParallelism = parallelism;
+                }).returns(new TypeHint<Tuple2<String, Object>>(){}).setParallelism(params.getInt("p1", 1));
         DataStream<Tuple2<Long, Bid>> bidDataStream = dataStream//.keyBy(0)
                 .assignTimestampsAndWatermarks(
                         new AssignerWithPunctuatedWatermarks<Tuple2<String, Object>>() {
@@ -273,7 +272,7 @@ public class KeyedHighestBid {
 //                        };
 //                    }
 //                }
-                ).name("flatmap-timestamp")
+                ).name("flatmap-timestamp").setParallelism(params.getInt("p1", 1))
                 //.countWindowAll(100)
                 .keyBy(
                         new KeySelector<Tuple2<String, Object>, Object>() {
@@ -322,7 +321,7 @@ public class KeyedHighestBid {
                         System.out.println("merge acc1 " + acc1 + " acc2 " + acc2);
                         return new Tuple2<>(acc1.f0 > acc2.f0?acc1.f0:acc2.f0, acc1.f1.price > acc2.f1.price?acc1.f1:acc2.f1);
                     }
-                }).name("TumblingEventTimeWindows-Aggregate");
+                }).name("TumblingEventTimeWindows-Aggregate").setParallelism(params.getInt("p2", 1));
         int finalWindowSize = windowSize;
         bidDataStream.addSink(new RichSinkFunction<Tuple2<Long, Bid>>() {
             @Override
@@ -332,7 +331,7 @@ public class KeyedHighestBid {
                 System.out.println(String.format("Highest Bid " + value.f1 + " wid " + value.f0/ finalWindowSize
                         + " latency " + (currentTime - value.f0)));
             }
-        }).name("aggregate-sink");
+        }).name("aggregate-sink").setParallelism(params.getInt("p2", 1));;
         env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
         env.execute("HighestBid");
     }
