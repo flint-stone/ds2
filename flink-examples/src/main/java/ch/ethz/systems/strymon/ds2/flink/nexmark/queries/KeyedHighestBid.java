@@ -146,7 +146,9 @@ public class KeyedHighestBid {
         int batchSize = 1;
         int range = 4;
 
-        DataStream<Tuple2<String, Object>> dataStream = bidSource.uid("bid-source").returns(InternalTypedSourceObject.class)
+        DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source")
+                .returns(InternalTypedSourceObject.class)
+                .rebalance()
                 .filter(x->x instanceof FunctionInvocation)
                 .flatMap(new RichFlatMapFunction<InternalTypedSourceObject, Tuple2<String, Object>>() {
                     private GeneratorConfig config;
@@ -216,7 +218,7 @@ public class KeyedHighestBid {
                             }
                         }
                     }
-                }).returns(new TypeHint<Tuple2<String, Object>>(){}).name("flatmap");
+                }).returns(new TypeHint<Tuple2<String, Object>>(){});
         int finalParallelism = parallelism;
         DataStream<Tuple2<Long, Bid>> bidDataStream = dataStream//.keyBy(0)
                 .assignTimestampsAndWatermarks(
@@ -271,7 +273,7 @@ public class KeyedHighestBid {
 //                        };
 //                    }
 //                }
-                )//.name("window")
+                ).name("flatmap-timestamp")
                 //.countWindowAll(100)
                 .keyBy(
                         new KeySelector<Tuple2<String, Object>, Object>() {
@@ -320,7 +322,7 @@ public class KeyedHighestBid {
                         System.out.println("merge acc1 " + acc1 + " acc2 " + acc2);
                         return new Tuple2<>(acc1.f0 > acc2.f0?acc1.f0:acc2.f0, acc1.f1.price > acc2.f1.price?acc1.f1:acc2.f1);
                     }
-                }).name("aggregate");
+                }).name("TumblingEventTimeWindows-Aggregate");
         int finalWindowSize = windowSize;
         bidDataStream.addSink(new RichSinkFunction<Tuple2<Long, Bid>>() {
             @Override
@@ -330,7 +332,7 @@ public class KeyedHighestBid {
                 System.out.println(String.format("Highest Bid " + value.f1 + " wid " + value.f0/ finalWindowSize
                         + " latency " + (currentTime - value.f0)));
             }
-        });
+        }).name("aggregate-sink");
         env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
         env.execute("HighestBid");
     }
