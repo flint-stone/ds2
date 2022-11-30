@@ -146,7 +146,7 @@ public class KeyedHighestBid {
         int batchSize = 1;
         int range = 4;
 
-        DataStream<Tuple2<String, Object>> dataStream = bidSource.uid("bid-source").returns(InternalTypedSourceObject.class).setParallelism(parallelism)
+        DataStream<Tuple2<String, Object>> dataStream = bidSource.uid("bid-source").returns(InternalTypedSourceObject.class)
                 .filter(x->x instanceof FunctionInvocation)
                 .flatMap(new RichFlatMapFunction<InternalTypedSourceObject, Tuple2<String, Object>>() {
                     private GeneratorConfig config;
@@ -216,7 +216,7 @@ public class KeyedHighestBid {
                             }
                         }
                     }
-                }).returns(new TypeHint<Tuple2<String, Object>>(){}).name("flatmap").setParallelism(parallelism);
+                }).returns(new TypeHint<Tuple2<String, Object>>(){}).name("flatmap");
         int finalParallelism = parallelism;
         DataStream<Tuple2<Long, Bid>> bidDataStream = dataStream//.keyBy(0)
                 .assignTimestampsAndWatermarks(
@@ -320,7 +320,7 @@ public class KeyedHighestBid {
                         System.out.println("merge acc1 " + acc1 + " acc2 " + acc2);
                         return new Tuple2<>(acc1.f0 > acc2.f0?acc1.f0:acc2.f0, acc1.f1.price > acc2.f1.price?acc1.f1:acc2.f1);
                     }
-                }).name("aggregate").setParallelism(parallelism);
+                }).name("aggregate");
         int finalWindowSize = windowSize;
         bidDataStream.addSink(new RichSinkFunction<Tuple2<Long, Bid>>() {
             @Override
