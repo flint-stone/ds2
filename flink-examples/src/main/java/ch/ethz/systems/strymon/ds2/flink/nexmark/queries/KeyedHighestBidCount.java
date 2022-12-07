@@ -144,7 +144,7 @@ public class KeyedHighestBidCount {
 
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
         int batchSize = 1;
-        int range = 4;
+        int range = params.getInt("range", 1);
 
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
@@ -298,6 +298,9 @@ public class KeyedHighestBidCount {
                     public Tuple3<Long, HashMap<Long, Bid>, Integer> add(Tuple2<String, Object> o, Tuple3<Long, HashMap<Long, Bid>, Integer> longBidTuple2) {
                         if(o.f1 instanceof ArrayList){
                             //Bid highestBid = ((ArrayList<Bid>)o.f1).get(0);
+                            if(longBidTuple2.f1 == null){
+                                longBidTuple2.f1 = new HashMap<Long, Bid>();
+                            }
                             HashMap<Long, Bid> accMap = longBidTuple2.f1;
                             Long highestTS = ((ArrayList<Bid>)o.f1).get(0).dateTime;
                             int count = longBidTuple2.f2;

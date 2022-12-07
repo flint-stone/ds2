@@ -144,7 +144,7 @@ public class KeyedHighestBid {
 
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
         int batchSize = 1;
-        int range = 4;
+        int range = params.getInt("range", 1);
 
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
