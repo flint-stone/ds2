@@ -143,8 +143,8 @@ public class KeyedHighestBid {
         NexmarkDynamicBatchSourceFunction sourceFunction = new NexmarkDynamicBatchSourceFunction(generatorConfig);
 
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
-        int batchSize = 1;
         int range = params.getInt("range", 1);
+        int batchSize = params.getInt("batch", 1);
 
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
@@ -176,7 +176,6 @@ public class KeyedHighestBid {
                     public void flatMap(InternalTypedSourceObject input, Collector<Tuple2<String, Object>> collector) throws Exception {
                         FunctionInvocation invocation  = (FunctionInvocation)input;
                         Object o = invocation.messageWrapper;
-                        System.out.println("flatmap item " + input);
                         if(o instanceof Long){
                             Long ts = (long)o;
                             HashMap<Long, ArrayList<Bid>> outputCollection = new HashMap<>();
@@ -205,6 +204,7 @@ public class KeyedHighestBid {
                             for(long targetIndex : outputCollection.keySet()){
                                 long mappedTargetIndex = targetIndex;
                                 targetIndexAcc.add(mappedTargetIndex);
+                                System.out.println("flatmap item " + input + " output item key " + String.valueOf(mappedTargetIndex) + " value size " + outputCollection.get(targetIndex).size() + " tid: " + Thread.currentThread().getName());
                                 collector.collect(new Tuple2<>(String.valueOf(mappedTargetIndex), outputCollection.get(targetIndex)));
                             }
                         }
@@ -226,7 +226,7 @@ public class KeyedHighestBid {
                             @Nullable
                             @Override
                             public Watermark checkAndGetNextWatermark(Tuple2<String, Object> longObjectTuple2, long l) {
-                                System.out.println("emit watermark " + (l -1));
+                                // System.out.println("emit watermark " + (l -1));
                                 return new Watermark(l -1);
                             }
 

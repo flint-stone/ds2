@@ -143,7 +143,7 @@ public class KeyedHighestBidCount {
         NexmarkDynamicBatchSourceFunction sourceFunction = new NexmarkDynamicBatchSourceFunction(generatorConfig);
 
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
-        int batchSize = 1;
+        int batchSize = params.getInt("batch", 1);;
         int range = params.getInt("range", 1);
 
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
@@ -205,6 +205,7 @@ public class KeyedHighestBidCount {
                             for(long targetIndex : outputCollection.keySet()){
                                 long mappedTargetIndex = targetIndex;
                                 targetIndexAcc.add(mappedTargetIndex);
+                                System.out.println("Dispatch request to " + mappedTargetIndex + " with size " + outputCollection.get(targetIndex).size());
                                 collector.collect(new Tuple2<>(String.valueOf(mappedTargetIndex), outputCollection.get(targetIndex)));
                             }
                         }
@@ -226,7 +227,7 @@ public class KeyedHighestBidCount {
                             @Nullable
                             @Override
                             public Watermark checkAndGetNextWatermark(Tuple2<String, Object> longObjectTuple2, long l) {
-                                System.out.println("emit watermark " + (l -1));
+                                // System.out.println("emit watermark " + (l -1));
                                 return new Watermark(l -1);
                             }
 
@@ -236,10 +237,10 @@ public class KeyedHighestBidCount {
                                 if(obj.f1 instanceof ArrayList){
                                     ArrayList<Bid> bidList = (ArrayList<Bid>)obj.f1;
                                     currentHighest = Math.max(bidList.get(bidList.size() - 1).dateTime, currentHighest);
-                                    System.out.println("extractTimestamp " + currentHighest);
+                                    //System.out.println("extractTimestamp " + currentHighest);
                                     return currentHighest;
                                 }
-                                System.out.println("extractTimestamp " + currentHighest);
+                                //System.out.println("extractTimestamp " + currentHighest);
                                 return currentHighest;
                             }
                         }
@@ -278,7 +279,7 @@ public class KeyedHighestBidCount {
                         new KeySelector<Tuple2<String, Object>, Object>() {
                             @Override
                             public Object getKey(Tuple2<String, Object> stringObjectTuple2) throws Exception {
-                                System.out.println("keyBy item " + stringObjectTuple2);
+                                //System.out.println("keyBy item " + stringObjectTuple2);
                                 return stringObjectTuple2.f0;
                             }
                         }
@@ -315,7 +316,7 @@ public class KeyedHighestBidCount {
                             }
                             count += ((ArrayList<Bid>)o.f1).size();
                             Tuple3<Long, HashMap<Long, Bid>, Integer> ret =  new Tuple3<>(highestTS, accMap, count);
-                            System.out.println("Current highest " + ret);
+                            //System.out.println("Current highest " + ret);
                             return ret;
                         }
                         return longBidTuple2;
@@ -323,13 +324,13 @@ public class KeyedHighestBidCount {
 
                     @Override
                     public Tuple3<Long, HashMap<Long, Bid>, Integer> getResult(Tuple3<Long, HashMap<Long, Bid>, Integer> accumulator) {
-                        System.out.println("getResult accumulator " + accumulator);
+                        //System.out.println("getResult accumulator " + accumulator);
                         return accumulator;
                     }
 
                     @Override
                     public Tuple3<Long, HashMap<Long, Bid>, Integer> merge(Tuple3<Long, HashMap<Long, Bid>, Integer> acc1, Tuple3<Long, HashMap<Long, Bid>, Integer> acc2) {
-                        System.out.println("merge acc1 " + acc1 + " acc2 " + acc2);
+                        //System.out.println("merge acc1 " + acc1 + " acc2 " + acc2);
                         long highestTS = (acc1.f0>acc2.f0? acc1.f0 : acc2.f0);
                         acc2.f1.entrySet().stream().forEach(e->{
                             if(acc1.f1.containsKey(e.getKey())){
@@ -348,8 +349,9 @@ public class KeyedHighestBidCount {
             public void invoke(Tuple3<Long, HashMap<Long, Bid>, Integer> value, Context context) throws Exception {
                 super.invoke(value, context);
                 Long currentTime = System.currentTimeMillis();
-                Bid top = value.f1.entrySet().stream().map(kv->(Bid)kv.getValue()).max(Comparator.comparingLong(a -> a.price)).orElse(null);
-                System.out.println(String.format("Highest Bid " + top + " wid " + value.f0/ finalWindowSize + " total " + value.f2
+                Bid top = null;
+                if (value.f1 !=null) top = value.f1.entrySet().stream().map(kv->(Bid)kv.getValue()).max(Comparator.comparingLong(a -> a.price)).orElse(null);
+                System.out.println(String.format("Highest Bid " + top==null?"null":top + " wid " + value.f0/ finalWindowSize + " total " + value.f2
                         + " latency " + (currentTime - value.f0)));
             }
         }).name("aggregate-sink").setParallelism(params.getInt("p2", 1));;
