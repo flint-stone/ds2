@@ -130,6 +130,9 @@ public class KeyedHighestBid {
             nexmarkConf.rateShape = shape;
         }
         nexmarkConf.numEvents = num;
+        int range = params.getInt("range", 1);
+        int batchSize = params.getInt("batch", 1);
+        nexmarkConf.batchSize = batchSize;
         GeneratorConfig generatorConfig = new GeneratorConfig(
                 nexmarkConf,
                 System.currentTimeMillis(),
@@ -143,8 +146,6 @@ public class KeyedHighestBid {
         NexmarkDynamicBatchSourceFunction sourceFunction = new NexmarkDynamicBatchSourceFunction(generatorConfig);
 
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
-        int range = params.getInt("range", 1);
-        int batchSize = params.getInt("batch", 1);
 
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
@@ -343,8 +344,9 @@ public class KeyedHighestBid {
             public void invoke(Tuple2<Long, HashMap<Long, Bid>> value, Context context) throws Exception {
                 super.invoke(value, context);
                 Long currentTime = System.currentTimeMillis();
-                Bid top = value.f1.entrySet().stream().map(kv->(Bid)kv.getValue()).max(Comparator.comparingLong(a -> a.price)).orElse(null);
-                System.out.println(String.format("Highest Bid " + top + " wid " + value.f0/ finalWindowSize
+                Bid top = null;
+                if (value.f1 !=null) top = value.f1.entrySet().stream().map(kv->(Bid)kv.getValue()).max(Comparator.comparingLong(a -> a.price)).orElse(null);
+                System.out.println(String.format("Highest Bid " + (top==null?"null":top) + " wid " + value.f0/ finalWindowSize
                         + " latency " + (currentTime - value.f0)));
             }
         }).name("aggregate-sink").setParallelism(params.getInt("p2", 1));;

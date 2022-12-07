@@ -10,6 +10,7 @@ import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
@@ -130,6 +131,9 @@ public class KeyedHighestBidCount {
             nexmarkConf.rateShape = shape;
         }
         nexmarkConf.numEvents = num;
+        int range = params.getInt("range", 1);
+        int batchSize = params.getInt("batch", 1);
+        nexmarkConf.batchSize = batchSize;
         GeneratorConfig generatorConfig = new GeneratorConfig(
                 nexmarkConf,
                 System.currentTimeMillis(),
@@ -143,9 +147,8 @@ public class KeyedHighestBidCount {
         NexmarkDynamicBatchSourceFunction sourceFunction = new NexmarkDynamicBatchSourceFunction(generatorConfig);
 
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
-        int batchSize = params.getInt("batch", 1);;
-        int range = params.getInt("range", 1);
 
+        int finalWindowSize1 = windowSize;
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
                 //.rebalance()
@@ -176,7 +179,7 @@ public class KeyedHighestBidCount {
                     public void flatMap(InternalTypedSourceObject input, Collector<Tuple2<String, Object>> collector) throws Exception {
                         FunctionInvocation invocation  = (FunctionInvocation)input;
                         Object o = invocation.messageWrapper;
-                        System.out.println("flatmap item " + input);
+                        System.out.println("flatmap item " + input + " tid " + Thread.currentThread().getName());
                         if(o instanceof Long){
                             Long ts = (long)o;
                             HashMap<Long, ArrayList<Bid>> outputCollection = new HashMap<>();
@@ -205,7 +208,9 @@ public class KeyedHighestBidCount {
                             for(long targetIndex : outputCollection.keySet()){
                                 long mappedTargetIndex = targetIndex;
                                 targetIndexAcc.add(mappedTargetIndex);
-                                System.out.println("Dispatch request to " + mappedTargetIndex + " with size " + outputCollection.get(targetIndex).size());
+//                                System.out.println("Dispatch request to " + mappedTargetIndex +  " keygroup " + mappedTargetIndex + " with size " + outputCollection.get(targetIndex).size()
+//                                        + " tail " + outputCollection.get(targetIndex).get(outputCollection.get(targetIndex).size() - 1).dateTime + " tid: " + Thread.currentThread().getName() );
+                                System.out.println("Dispatch request to " + mappedTargetIndex + " with size " + outputCollection.get(targetIndex).size() +" id " +  ts/ finalWindowSize1 +  " tid: " + Thread.currentThread().getName());
                                 collector.collect(new Tuple2<>(String.valueOf(mappedTargetIndex), outputCollection.get(targetIndex)));
                             }
                         }
@@ -220,7 +225,7 @@ public class KeyedHighestBidCount {
                         }
                     }
                 }).returns(new TypeHint<Tuple2<String, Object>>(){}).setParallelism(params.getInt("p1", 1));
-        DataStream<Tuple3<Long, HashMap<Long, Bid>, Integer>> bidDataStream = dataStream//.keyBy(0)
+        DataStream<Tuple4<Long, HashMap<Long, Bid>, Integer, String>> bidDataStream = dataStream//.keyBy(0)
                 .assignTimestampsAndWatermarks(
                         new AssignerWithPunctuatedWatermarks<Tuple2<String, Object>>() {
                             Long currentHighest = 0L;
@@ -289,19 +294,20 @@ public class KeyedHighestBidCount {
 //            return x.f0.toString();
 //        })
                 .window(TumblingEventTimeWindows.of(Time.milliseconds(windowSize)))
-                .aggregate(new AggregateFunction<Tuple2<String, Object>, Tuple3<Long, HashMap<Long, Bid>, Integer>, Tuple3<Long, HashMap<Long, Bid>, Integer>>() {
+                .aggregate(new AggregateFunction<Tuple2<String, Object>, Tuple4<Long, HashMap<Long, Bid>, Integer, String>, Tuple4<Long, HashMap<Long, Bid>, Integer, String>>() {
                     @Override
-                    public Tuple3<Long, HashMap<Long, Bid>, Integer> createAccumulator() {
-                        return new Tuple3<>(0L, null, 0);
+                    public Tuple4<Long, HashMap<Long, Bid>, Integer, String> createAccumulator() {
+                        return new Tuple4<>(0L, null, 0, null);
                     }
 
                     @Override
-                    public Tuple3<Long, HashMap<Long, Bid>, Integer> add(Tuple2<String, Object> o, Tuple3<Long, HashMap<Long, Bid>, Integer> longBidTuple2) {
+                    public Tuple4<Long, HashMap<Long, Bid>, Integer, String> add(Tuple2<String, Object> o, Tuple4<Long, HashMap<Long, Bid>, Integer, String> longBidTuple2) {
                         if(o.f1 instanceof ArrayList){
                             //Bid highestBid = ((ArrayList<Bid>)o.f1).get(0);
                             if(longBidTuple2.f1 == null){
                                 longBidTuple2.f1 = new HashMap<Long, Bid>();
                             }
+                            // System.out.println("Receiving item with size pre " + ((ArrayList<Bid>)o.f1).size() + " keygroup " + o.f0 + " tid: " + Thread.currentThread().getName());
                             HashMap<Long, Bid> accMap = longBidTuple2.f1;
                             Long highestTS = ((ArrayList<Bid>)o.f1).get(0).dateTime;
                             int count = longBidTuple2.f2;
@@ -315,7 +321,8 @@ public class KeyedHighestBidCount {
                                 if(bid.dateTime > highestTS) highestTS = bid.dateTime;
                             }
                             count += ((ArrayList<Bid>)o.f1).size();
-                            Tuple3<Long, HashMap<Long, Bid>, Integer> ret =  new Tuple3<>(highestTS, accMap, count);
+                            // System.out.println("Receiving item with size post " + ((ArrayList<Bid>)o.f1).size() + " total " + count + " keygroup " + o.f0 + " tail " + ((ArrayList<Bid>)o.f1).get(((ArrayList<Bid>)o.f1).size() - 1).dateTime + " tid: " + Thread.currentThread().getName());
+                            Tuple4<Long, HashMap<Long, Bid>, Integer, String> ret =  new Tuple4<>(highestTS, accMap, count, o.f0);
                             //System.out.println("Current highest " + ret);
                             return ret;
                         }
@@ -323,14 +330,14 @@ public class KeyedHighestBidCount {
                     }
 
                     @Override
-                    public Tuple3<Long, HashMap<Long, Bid>, Integer> getResult(Tuple3<Long, HashMap<Long, Bid>, Integer> accumulator) {
-                        //System.out.println("getResult accumulator " + accumulator);
+                    public Tuple4<Long, HashMap<Long, Bid>, Integer, String> getResult(Tuple4<Long, HashMap<Long, Bid>, Integer, String> accumulator) {
+                        // System.out.println("getResult accumulator " + accumulator.f0 + ":" + (accumulator.f1==null?"null" : accumulator.f1.size())+ ":" + accumulator.f2 + " keygroup " + accumulator.f3+ " tid: " + Thread.currentThread().getName());
                         return accumulator;
                     }
 
                     @Override
-                    public Tuple3<Long, HashMap<Long, Bid>, Integer> merge(Tuple3<Long, HashMap<Long, Bid>, Integer> acc1, Tuple3<Long, HashMap<Long, Bid>, Integer> acc2) {
-                        //System.out.println("merge acc1 " + acc1 + " acc2 " + acc2);
+                    public Tuple4<Long, HashMap<Long, Bid>, Integer, String> merge(Tuple4<Long, HashMap<Long, Bid>, Integer, String> acc1, Tuple4<Long, HashMap<Long, Bid>, Integer, String> acc2) {
+                        // System.out.println("merge acc1 " + acc1 + " acc2 " + acc2 + " tid: " + Thread.currentThread().getName());
                         long highestTS = (acc1.f0>acc2.f0? acc1.f0 : acc2.f0);
                         acc2.f1.entrySet().stream().forEach(e->{
                             if(acc1.f1.containsKey(e.getKey())){
@@ -340,18 +347,18 @@ public class KeyedHighestBidCount {
                                 acc1.f1.put(e.getKey(), e.getValue());
                             }
                         });
-                        return new Tuple3<>(highestTS, acc1.f1, acc1.f2 + acc2.f2);
+                        return new Tuple4<>(highestTS, acc1.f1, acc1.f2 + acc2.f2, acc1.f3);
                     }
                 }).name("TumblingEventTimeWindows-Aggregate").setParallelism(params.getInt("p2", 1));
         int finalWindowSize = windowSize;
-        bidDataStream.addSink(new RichSinkFunction<Tuple3<Long, HashMap<Long, Bid>, Integer>>() {
+        bidDataStream.addSink(new RichSinkFunction<Tuple4<Long, HashMap<Long, Bid>, Integer, String>>() {
             @Override
-            public void invoke(Tuple3<Long, HashMap<Long, Bid>, Integer> value, Context context) throws Exception {
+            public void invoke(Tuple4<Long, HashMap<Long, Bid>, Integer, String> value, Context context) throws Exception {
                 super.invoke(value, context);
                 Long currentTime = System.currentTimeMillis();
                 Bid top = null;
                 if (value.f1 !=null) top = value.f1.entrySet().stream().map(kv->(Bid)kv.getValue()).max(Comparator.comparingLong(a -> a.price)).orElse(null);
-                System.out.println(String.format("Highest Bid " + top==null?"null":top + " wid " + value.f0/ finalWindowSize + " total " + value.f2
+                System.out.println(String.format("Highest Bid " + (top==null?"null":top) + " wid " + value.f0/ finalWindowSize + " total " + value.f2 + " keygroup " + value.f3
                         + " latency " + (currentTime - value.f0)));
             }
         }).name("aggregate-sink").setParallelism(params.getInt("p2", 1));;
