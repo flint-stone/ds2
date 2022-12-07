@@ -2,15 +2,17 @@ package ch.ethz.systems.strymon.ds2.flink.nexmark.queries;
 
 import benchmark.statefunApp.NexmarkConfiguration;
 import generator.GeneratorConfig;
+import generator.model.BidGenerator;
+import model.Bid;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
-//import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.statefun.flink.core.functions.FunctionInvocation;
 import org.apache.flink.statefun.flink.core.message.InternalTypedSourceObject;
 import org.apache.flink.streaming.api.TimeCharacteristic;
@@ -25,8 +27,6 @@ import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.util.Collector;
 import source.NexmarkDynamicBatchSourceFunction;
 import utils.NexmarkUtils;
-import generator.model.BidGenerator;
-import model.Bid;
 
 import javax.annotation.Nullable;
 import java.util.*;
@@ -58,7 +58,7 @@ import java.util.*;
 //        WHERE B.dateTime BETWEEN B1.dateTime  - INTERVAL '10' SECOND AND B1.dateTime;
 
 
-public class KeyedHighestBid {
+public class KeyedHighestBidCount {
 
     public static void main(String... args) throws Exception {
 
@@ -219,7 +219,7 @@ public class KeyedHighestBid {
                         }
                     }
                 }).returns(new TypeHint<Tuple2<String, Object>>(){}).setParallelism(params.getInt("p1", 1));
-        DataStream<Tuple2<Long, HashMap<Long, Bid>>> bidDataStream = dataStream//.keyBy(0)
+        DataStream<Tuple3<Long, HashMap<Long, Bid>, Integer>> bidDataStream = dataStream//.keyBy(0)
                 .assignTimestampsAndWatermarks(
                         new AssignerWithPunctuatedWatermarks<Tuple2<String, Object>>() {
                             Long currentHighest = 0L;
@@ -288,18 +288,19 @@ public class KeyedHighestBid {
 //            return x.f0.toString();
 //        })
                 .window(TumblingEventTimeWindows.of(Time.milliseconds(windowSize)))
-                .aggregate(new AggregateFunction<Tuple2<String, Object>, Tuple2<Long, HashMap<Long, Bid>>, Tuple2<Long, HashMap<Long, Bid>>>() {
+                .aggregate(new AggregateFunction<Tuple2<String, Object>, Tuple3<Long, HashMap<Long, Bid>, Integer>, Tuple3<Long, HashMap<Long, Bid>, Integer>>() {
                     @Override
-                    public Tuple2<Long, HashMap<Long, Bid>> createAccumulator() {
-                        return new Tuple2<>(0L, null);
+                    public Tuple3<Long, HashMap<Long, Bid>, Integer> createAccumulator() {
+                        return new Tuple3<>(0L, null, 0);
                     }
 
                     @Override
-                    public Tuple2<Long, HashMap<Long, Bid>> add(Tuple2<String, Object> o, Tuple2<Long, HashMap<Long, Bid>> longBidTuple2) {
+                    public Tuple3<Long, HashMap<Long, Bid>, Integer> add(Tuple2<String, Object> o, Tuple3<Long, HashMap<Long, Bid>, Integer> longBidTuple2) {
                         if(o.f1 instanceof ArrayList){
                             //Bid highestBid = ((ArrayList<Bid>)o.f1).get(0);
                             HashMap<Long, Bid> accMap = longBidTuple2.f1;
                             Long highestTS = ((ArrayList<Bid>)o.f1).get(0).dateTime;
+                            int count = longBidTuple2.f2;
                             for(Bid bid : (ArrayList<Bid>)o.f1){
                                 if(!accMap.containsKey(bid.auction)){
                                     accMap.put(bid.auction, bid);
@@ -309,7 +310,8 @@ public class KeyedHighestBid {
                                 }
                                 if(bid.dateTime > highestTS) highestTS = bid.dateTime;
                             }
-                            Tuple2<Long, HashMap<Long, Bid>> ret =  new Tuple2<>(highestTS, accMap);
+                            count += ((ArrayList<Bid>)o.f1).size();
+                            Tuple3<Long, HashMap<Long, Bid>, Integer> ret =  new Tuple3<>(highestTS, accMap, count);
                             System.out.println("Current highest " + ret);
                             return ret;
                         }
@@ -317,13 +319,13 @@ public class KeyedHighestBid {
                     }
 
                     @Override
-                    public Tuple2<Long, HashMap<Long, Bid>> getResult(Tuple2<Long, HashMap<Long, Bid>> accumulator) {
+                    public Tuple3<Long, HashMap<Long, Bid>, Integer> getResult(Tuple3<Long, HashMap<Long, Bid>, Integer> accumulator) {
                         System.out.println("getResult accumulator " + accumulator);
                         return accumulator;
                     }
 
                     @Override
-                    public Tuple2<Long, HashMap<Long, Bid>> merge(Tuple2<Long, HashMap<Long, Bid>> acc1, Tuple2<Long, HashMap<Long, Bid>> acc2) {
+                    public Tuple3<Long, HashMap<Long, Bid>, Integer> merge(Tuple3<Long, HashMap<Long, Bid>, Integer> acc1, Tuple3<Long, HashMap<Long, Bid>, Integer> acc2) {
                         System.out.println("merge acc1 " + acc1 + " acc2 " + acc2);
                         long highestTS = (acc1.f0>acc2.f0? acc1.f0 : acc2.f0);
                         acc2.f1.entrySet().stream().forEach(e->{
@@ -334,17 +336,17 @@ public class KeyedHighestBid {
                                 acc1.f1.put(e.getKey(), e.getValue());
                             }
                         });
-                        return new Tuple2<>(highestTS, acc1.f1);
+                        return new Tuple3<>(highestTS, acc1.f1, acc1.f2 + acc2.f2);
                     }
                 }).name("TumblingEventTimeWindows-Aggregate").setParallelism(params.getInt("p2", 1));
         int finalWindowSize = windowSize;
-        bidDataStream.addSink(new RichSinkFunction<Tuple2<Long, HashMap<Long, Bid>>>() {
+        bidDataStream.addSink(new RichSinkFunction<Tuple3<Long, HashMap<Long, Bid>, Integer>>() {
             @Override
-            public void invoke(Tuple2<Long, HashMap<Long, Bid>> value, Context context) throws Exception {
+            public void invoke(Tuple3<Long, HashMap<Long, Bid>, Integer> value, Context context) throws Exception {
                 super.invoke(value, context);
                 Long currentTime = System.currentTimeMillis();
                 Bid top = value.f1.entrySet().stream().map(kv->(Bid)kv.getValue()).max(Comparator.comparingLong(a -> a.price)).orElse(null);
-                System.out.println(String.format("Highest Bid " + top + " wid " + value.f0/ finalWindowSize
+                System.out.println(String.format("Highest Bid " + top + " wid " + value.f0/ finalWindowSize + " total " + value.f2
                         + " latency " + (currentTime - value.f0)));
             }
         }).name("aggregate-sink").setParallelism(params.getInt("p2", 1));;
