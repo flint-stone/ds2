@@ -71,6 +71,7 @@ public class KeyedHighestBidCount {
         int windowSize = 10000;
         int parallelism = 1;
         NexmarkUtils.RateShape shape = null;
+        Long paretoKeys = null;
         if (params.has("num")) {
             // read the text file from given input path
             num = Integer.parseInt(params.get("num"));
@@ -107,6 +108,9 @@ public class KeyedHighestBidCount {
         if (params.has("parallelism")) {
             // read the text file from given input path
             parallelism = Integer.parseInt(params.get("parallelism"));
+        }
+        if(params.has("paretokeys")){
+            paretoKeys = Long.parseLong(params.get("paretokeys"));
         }
         // -----------------------------------------------------------------------------------------
         // obtain the stream execution env and create some data streams
@@ -149,6 +153,7 @@ public class KeyedHighestBidCount {
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
 
         int finalWindowSize1 = windowSize;
+        Long finalParetoKeys = paretoKeys;
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
                 //.rebalance()
@@ -173,6 +178,8 @@ public class KeyedHighestBidCount {
                         this.highestBidLocal = new HashMap<>();
                         this.highestTS = new HashMap<>();
                         this.numBidsPerGroup = new HashMap<>();
+                        if(finalParetoKeys != null) this.config.setPopularKeyInterval(finalParetoKeys);
+                        System.out.println(String.format("Initiate flatmap operator with maxEvents %s popularity level %d tid: %s", generatorConfig.maxEvents, finalParetoKeys, Thread.currentThread().getName()));
                     }
 
                     @Override
@@ -185,7 +192,13 @@ public class KeyedHighestBidCount {
                             HashMap<Long, ArrayList<Bid>> outputCollection = new HashMap<>();
                             for (int i = 0; i < batchSize; i++){
                                 long newEventId = this.config.firstEventId + eventId;
-                                Bid bid = BidGenerator.nextBid(newEventId, new Random(newEventId), ts, config);
+                                Bid bid;
+                                if(this.config.getPopularKeyInterval() != null){
+                                    bid = BidGenerator.nextBidPareto(newEventId, new Random(newEventId), ts, config, range);
+                                }
+                                else{
+                                    bid = BidGenerator.nextBid(newEventId, new Random(newEventId), ts, config);
+                                }
                                 eventId++;
                                 long targetIndex = Math.floorMod(bid.auction, range);
                                 outputCollection.putIfAbsent(targetIndex, new ArrayList<>());
