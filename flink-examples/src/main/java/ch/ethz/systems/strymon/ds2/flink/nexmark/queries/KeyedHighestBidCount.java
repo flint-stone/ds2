@@ -4,12 +4,12 @@ import benchmark.statefunApp.NexmarkConfiguration;
 import generator.GeneratorConfig;
 import generator.model.BidGenerator;
 import model.Bid;
+import org.apache.commons.math3.distribution.ParetoDistribution;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.configuration.ConfigConstants;
@@ -31,6 +31,7 @@ import utils.NexmarkUtils;
 
 import javax.annotation.Nullable;
 import java.util.*;
+import java.util.stream.Collectors;
 
 //SELECT Rstream(B.auction, B.price, B.bidder)
 //        FROM Bid [RANGE 1 MINUTE SLIDE 1 MINUTE] B
@@ -62,32 +63,26 @@ import java.util.*;
 public class KeyedHighestBidCount {
 
     public static void main(String... args) throws Exception {
-
         final ParameterTool params = ParameterTool.fromArgs(args);
         int num = 200000;
-        int keys = 5;
-        long delayinUs = 1000; // 1ms
-        long sleep = 10L;
-        int windowSize = 10000;
-        int parallelism = 1;
-        NexmarkUtils.RateShape shape = null;
-        Long paretoKeys = null;
         if (params.has("num")) {
             // read the text file from given input path
             num = Integer.parseInt(params.get("num"));
         }
-        if (params.has("keys")) {
-            // read the text file from given input path
-            keys = Integer.parseInt(params.get("keys"));
-        }
+
+        long delayinUs = 1000; // 1ms
         if (params.has("delay")) {
             // read the text file from given input path
             delayinUs = Long.parseLong(params.get("delay"));
         }
+
+        long sleep = 10L;
         if (params.has("sleep")) { //milliseconds
             // read the text file from given input path
             sleep = Long.parseLong(params.get("sleep"));
         }
+
+        NexmarkUtils.RateShape shape = null;
         if (params.has("shape")) { //milliseconds
             // read the text file from given input path
             switch (params.get("shape")){
@@ -101,16 +96,32 @@ public class KeyedHighestBidCount {
                     shape = NexmarkUtils.RateShape.SQUARE;
             }
         }
+
+        int windowSize = 10000;
         if (params.has("window")) { //milliseconds
             // read the text file from given input path
             windowSize = Integer.parseInt(params.get("window"));
         }
-        if (params.has("parallelism")) {
-            // read the text file from given input path
-            parallelism = Integer.parseInt(params.get("parallelism"));
-        }
+
+        Long paretoKeys = null;
         if(params.has("paretokeys")){
             paretoKeys = Long.parseLong(params.get("paretokeys"));
+        }
+
+        int bufferPerKey = 1;
+        if(params.has("bufferperkey")){
+            bufferPerKey = Integer.parseInt(params.get("bufferperkey"));
+        }
+
+        double paretoScale = 1.0;
+        if(params.has("paretoscale")){
+            paretoScale = Double.parseDouble(params.get("paretoscale"));
+        }
+
+        int keys = 1;
+        if (params.has("keys")) {
+            // read the text file from given input path
+            keys = Integer.parseInt(params.get("keys"));
         }
         // -----------------------------------------------------------------------------------------
         // obtain the stream execution env and create some data streams
@@ -147,13 +158,14 @@ public class KeyedHighestBidCount {
         generatorConfig.interEventDelayUs = new double[]{delayinUs};
         generatorConfig.sleep = sleep;
         generatorConfig.params = params;
+        generatorConfig.popularKeyInterval = paretoKeys;
+        generatorConfig.bufferPerKey = bufferPerKey;
+        generatorConfig.paretoScale = paretoScale;
+        generatorConfig.numKeys = keys;
 
         NexmarkDynamicBatchSourceFunction sourceFunction = new NexmarkDynamicBatchSourceFunction(generatorConfig);
-
         DataStreamSource<InternalTypedSourceObject> bidSource = env.addSource(sourceFunction);
-
-        int finalWindowSize1 = windowSize;
-        Long finalParetoKeys = paretoKeys;
+        int finalWindowSize = windowSize;
         DataStream<Tuple2<String, Object>> dataStream = bidSource.name("bid-source").setParallelism(params.getInt("p1", 1))
                 .returns(InternalTypedSourceObject.class)
                 //.rebalance()
@@ -164,6 +176,7 @@ public class KeyedHighestBidCount {
                     private HashMap<Long, Bid> highestBidLocal;
                     private HashMap<Long, Long> highestTS;
                     private HashMap<Long, Integer> numBidsPerGroup;
+                    private HashMap<Long, ArrayList<Bid>> outputCollection;
 
                     @Override
                     public void open(Configuration parameters) throws Exception {
@@ -178,8 +191,14 @@ public class KeyedHighestBidCount {
                         this.highestBidLocal = new HashMap<>();
                         this.highestTS = new HashMap<>();
                         this.numBidsPerGroup = new HashMap<>();
-                        if(finalParetoKeys != null) this.config.setPopularKeyInterval(finalParetoKeys);
-                        System.out.println(String.format("Initiate flatmap operator with maxEvents %s popularity level %d tid: %s", generatorConfig.maxEvents, finalParetoKeys, Thread.currentThread().getName()));
+                        this.outputCollection = new HashMap<>();
+                        if(generatorConfig.popularKeyInterval != null) {
+                            this.config.popularKeyInterval = generatorConfig.popularKeyInterval;
+                            this.config.paretoDistribution = new ParetoDistribution(1, generatorConfig.paretoScale);
+                            this.config.numKeys = generatorConfig.numKeys;
+                            this.config.bufferPerKey = generatorConfig.bufferPerKey;
+                        }
+                        System.out.println(String.format("Initiate flatmap operator with generatorConfig %s tid: %s", generatorConfig, Thread.currentThread().getName()));
                     }
 
                     @Override
@@ -189,52 +208,63 @@ public class KeyedHighestBidCount {
                         System.out.println("flatmap item " + input + " tid " + Thread.currentThread().getName());
                         if(o instanceof Long){
                             Long ts = (long)o;
-                            HashMap<Long, ArrayList<Bid>> outputCollection = new HashMap<>();
                             for (int i = 0; i < batchSize; i++){
                                 long newEventId = this.config.firstEventId + eventId;
                                 Bid bid;
-                                if(this.config.getPopularKeyInterval() != null){
-                                    bid = BidGenerator.nextBidPareto(newEventId, new Random(newEventId), ts, config, range);
+                                if(config.popularKeyInterval != null){
+                                    bid = BidGenerator.nextBidPareto(newEventId, new Random(newEventId), ts, config, config.numKeys);
                                 }
                                 else{
                                     bid = BidGenerator.nextBid(newEventId, new Random(newEventId), ts, config);
                                 }
                                 eventId++;
-                                long targetIndex = Math.floorMod(bid.auction, range);
-                                outputCollection.putIfAbsent(targetIndex, new ArrayList<>());
-                                outputCollection.get(targetIndex).add(bid);
+                                long key = Math.floorMod(bid.auction, config.numKeys);
+                                outputCollection.putIfAbsent(key, new ArrayList<>());
+                                outputCollection.get(key).add(bid);
                                 // Tracing only
-                                long mappedTargetIndex = targetIndex;
-                                if(!highestBidLocal.containsKey(mappedTargetIndex)){
-                                    highestBidLocal.put(mappedTargetIndex, bid);
-                                    highestTS.put(mappedTargetIndex, bid.dateTime);
-                                    numBidsPerGroup.put(mappedTargetIndex, 1);
+                                if(!highestBidLocal.containsKey(key)){
+                                    highestBidLocal.put(key, bid);
+                                    highestTS.put(key, bid.dateTime);
+                                    numBidsPerGroup.put(key, 1);
                                 }
                                 else{
-                                    highestBidLocal.compute(mappedTargetIndex, (k, v)->v.price>bid.price?v : bid);
-                                    highestTS.compute(mappedTargetIndex, (k, v)->v>bid.dateTime?v:bid.dateTime);
-                                    numBidsPerGroup.compute(mappedTargetIndex, (k, v)->v+1);
+                                    highestBidLocal.compute(key, (k, v)->v.price>bid.price?v : bid);
+                                    highestTS.compute(key, (k, v)->v>bid.dateTime?v:bid.dateTime);
+                                    numBidsPerGroup.compute(key, (k, v)->v+1);
                                 }
                             }
-
-                            List<Long> targetIndexAcc = new ArrayList<>();
-                            for(long targetIndex : outputCollection.keySet()){
-                                long mappedTargetIndex = targetIndex;
-                                targetIndexAcc.add(mappedTargetIndex);
-//                                System.out.println("Dispatch request to " + mappedTargetIndex +  " keygroup " + mappedTargetIndex + " with size " + outputCollection.get(targetIndex).size()
-//                                        + " tail " + outputCollection.get(targetIndex).get(outputCollection.get(targetIndex).size() - 1).dateTime + " tid: " + Thread.currentThread().getName() );
-                                System.out.println("Dispatch request to " + mappedTargetIndex + " with size " + outputCollection.get(targetIndex).size() +" id " +  ts/ finalWindowSize1 +  " tid: " + Thread.currentThread().getName());
-                                collector.collect(new Tuple2<>(String.valueOf(mappedTargetIndex), outputCollection.get(targetIndex)));
+                            List<Map.Entry<Long, ArrayList<Bid>>> readyList = outputCollection.entrySet().stream().filter(e->e.getValue().size() >= config.bufferPerKey).collect(Collectors.toList());
+                            for(Map.Entry<Long, ArrayList<Bid>> pair : readyList){
+                                long mappedTargetIndex = Math.floorMod(pair.getKey(), range);
+                                int translatedOperatorIndex = computeKeyGroupForOperatorIndex(getRuntimeContext().getMaxNumberOfParallelSubtasks(),
+                                        getRuntimeContext().getNumberOfParallelSubtasks(), (int) mappedTargetIndex);
+                                int i = 0;
+                                int originalSize = outputCollection.get(pair.getKey()).size();
+                                System.out.println("bufferPerKey " + this.config.bufferPerKey + " size " + pair.getValue().size() + " tid: " + Thread.currentThread().getName());
+                                while(i + this.config.bufferPerKey < pair.getValue().size()) {
+                                    collector.collect(new Tuple2<>(String.valueOf(mappedTargetIndex), new ArrayList<>(pair.getValue().subList(i, i + config.bufferPerKey))));
+                                    i+= this.config.bufferPerKey;
+                                }
+                                outputCollection.get(pair.getKey()).subList(0, i).clear();
+                                System.out.println("Dispatch regular key " + pair.getKey() + " id " + ts/finalWindowSize+ " size dispatched " + i + " pre " + originalSize + " remaining "  + outputCollection.get(pair.getKey()).size()+ " tid: " + Thread.currentThread().getName());
                             }
+                            // System.out.println("Dispatch request to " + outputCollection.entrySet().stream().map(e->e.getKey()+":"+e.getValue().size()).collect(Collectors.joining("||||||")) + " id " +  ts/ finalWindowSize1 +  " tid: " + Thread.currentThread().getName());
                         }
                         else if(o instanceof Tuple2){
                             Long cmId = ((Tuple2<Long, Long>) o).f0;
                             highestBidLocal.clear();
                             highestTS.clear();
                             numBidsPerGroup.clear();
-                            for(int i = 0; i < range; i++){
-                                collector.collect(new Tuple2<>(String.valueOf(i), cmId));
+                            System.out.println("Dispatch remaining to " + outputCollection.entrySet().stream().map(e->e.getKey()+":"+e.getValue().size()).collect(Collectors.joining("||||||")) + " id " + cmId + " tid: " + Thread.currentThread().getName());
+                            for(int key = 0; key < config.numKeys; key++){
+                                long targetIndex = Math.floorMod(key, range); //key/((config.numKeys + range)/range);
+                                ArrayList<Bid> send = new ArrayList<>();
+                                int translatedOperatorIndex = computeKeyGroupForOperatorIndex(getRuntimeContext().getMaxNumberOfParallelSubtasks(),
+                                        getRuntimeContext().getNumberOfParallelSubtasks(), (int)targetIndex);
+                                if(outputCollection.containsKey((long)key)) send.addAll(outputCollection.get((long)key));
+                                collector.collect(new Tuple2<>(String.valueOf(targetIndex), new Tuple2<>(cmId, outputCollection.containsKey((long)key)?send:null)));
                             }
+                            outputCollection.clear();
                         }
                     }
                 }).returns(new TypeHint<Tuple2<String, Object>>(){}).setParallelism(params.getInt("p1", 1));
@@ -314,17 +344,31 @@ public class KeyedHighestBidCount {
                     }
 
                     @Override
-                    public Tuple4<Long, HashMap<Long, Bid>, Integer, String> add(Tuple2<String, Object> o, Tuple4<Long, HashMap<Long, Bid>, Integer, String> longBidTuple2) {
-                        if(o.f1 instanceof ArrayList){
+                    public Tuple4<Long, HashMap<Long, Bid>, Integer, String> add(Tuple2<String, Object> o, Tuple4<Long, HashMap<Long, Bid>, Integer, String> acc) {
+//                        if(o.f1 instanceof ArrayList){
                             //Bid highestBid = ((ArrayList<Bid>)o.f1).get(0);
-                            if(longBidTuple2.f1 == null){
-                                longBidTuple2.f1 = new HashMap<Long, Bid>();
+                        ArrayList<Bid> inputList = null;
+                        if(o.f1 instanceof ArrayList){
+                            inputList = (ArrayList<Bid>) o.f1;
+                            System.out.println("Receiving regular data " + (inputList == null?"null":inputList.size()) + " key " +  Math.floorMod(inputList.get(0).auction, generatorConfig.numKeys) + " id " + o.f0 + " tid: " + Thread.currentThread().getName());
+                        }
+                        else if(o.f1 instanceof Tuple2){
+                            inputList = ((Tuple2<Long, ArrayList<Bid>>)(o.f1)).f1;
+                            long key = -1L;
+                            if(inputList != null){
+                                key = Math.floorMod(inputList.get(0).auction, generatorConfig.numKeys);
+                            }
+                            System.out.println("Receiving remaining data " + (inputList == null?"null":inputList.size()) + " key " + key + " id " + o.f0 + " tid: " + Thread.currentThread().getName());
+                        }
+                        if(inputList != null){
+                            if(acc.f1 == null){
+                                acc.f1 = new HashMap<Long, Bid>();
                             }
                             // System.out.println("Receiving item with size pre " + ((ArrayList<Bid>)o.f1).size() + " keygroup " + o.f0 + " tid: " + Thread.currentThread().getName());
-                            HashMap<Long, Bid> accMap = longBidTuple2.f1;
-                            Long highestTS = ((ArrayList<Bid>)o.f1).get(0).dateTime;
-                            int count = longBidTuple2.f2;
-                            for(Bid bid : (ArrayList<Bid>)o.f1){
+                            HashMap<Long, Bid> accMap = acc.f1;
+                            Long highestTS = inputList.get(0).dateTime;
+                            int count = acc.f2;
+                            for(Bid bid : inputList){
                                 if(!accMap.containsKey(bid.auction)){
                                     accMap.put(bid.auction, bid);
                                 }
@@ -333,24 +377,24 @@ public class KeyedHighestBidCount {
                                 }
                                 if(bid.dateTime > highestTS) highestTS = bid.dateTime;
                             }
-                            count += ((ArrayList<Bid>)o.f1).size();
+                            count += inputList.size();
                             // System.out.println("Receiving item with size post " + ((ArrayList<Bid>)o.f1).size() + " total " + count + " keygroup " + o.f0 + " tail " + ((ArrayList<Bid>)o.f1).get(((ArrayList<Bid>)o.f1).size() - 1).dateTime + " tid: " + Thread.currentThread().getName());
                             Tuple4<Long, HashMap<Long, Bid>, Integer, String> ret =  new Tuple4<>(highestTS, accMap, count, o.f0);
                             //System.out.println("Current highest " + ret);
                             return ret;
                         }
-                        return longBidTuple2;
+                        return acc;
                     }
 
                     @Override
                     public Tuple4<Long, HashMap<Long, Bid>, Integer, String> getResult(Tuple4<Long, HashMap<Long, Bid>, Integer, String> accumulator) {
-                        // System.out.println("getResult accumulator " + accumulator.f0 + ":" + (accumulator.f1==null?"null" : accumulator.f1.size())+ ":" + accumulator.f2 + " keygroup " + accumulator.f3+ " tid: " + Thread.currentThread().getName());
+                        System.out.println("getResult accumulator " + accumulator.f0 + ":" + (accumulator.f1==null?"null" : accumulator.f1.size())+ ":" + accumulator.f2 + " keygroup " + accumulator.f3+ " tid: " + Thread.currentThread().getName());
                         return accumulator;
                     }
 
                     @Override
                     public Tuple4<Long, HashMap<Long, Bid>, Integer, String> merge(Tuple4<Long, HashMap<Long, Bid>, Integer, String> acc1, Tuple4<Long, HashMap<Long, Bid>, Integer, String> acc2) {
-                        // System.out.println("merge acc1 " + acc1 + " acc2 " + acc2 + " tid: " + Thread.currentThread().getName());
+                        System.out.println("merge acc1 " + acc1 + " acc2 " + acc2 + " tid: " + Thread.currentThread().getName());
                         long highestTS = (acc1.f0>acc2.f0? acc1.f0 : acc2.f0);
                         acc2.f1.entrySet().stream().forEach(e->{
                             if(acc1.f1.containsKey(e.getKey())){
@@ -363,7 +407,7 @@ public class KeyedHighestBidCount {
                         return new Tuple4<>(highestTS, acc1.f1, acc1.f2 + acc2.f2, acc1.f3);
                     }
                 }).name("TumblingEventTimeWindows-Aggregate").setParallelism(params.getInt("p2", 1));
-        int finalWindowSize = windowSize;
+
         bidDataStream.addSink(new RichSinkFunction<Tuple4<Long, HashMap<Long, Bid>, Integer, String>>() {
             @Override
             public void invoke(Tuple4<Long, HashMap<Long, Bid>, Integer, String> value, Context context) throws Exception {
@@ -376,7 +420,12 @@ public class KeyedHighestBidCount {
             }
         }).name("aggregate-sink").setParallelism(params.getInt("p2", 1));;
         env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+        env.setMaxParallelism(params.getInt("p1", 1));
         env.execute("HighestBid");
+    }
+
+    private static int computeKeyGroupForOperatorIndex(int maxParallelism, int parallelism, int operatorIndex) {
+        return operatorIndex * maxParallelism / parallelism;
     }
 
 }
