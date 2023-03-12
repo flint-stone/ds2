@@ -4,7 +4,7 @@ import benchmark.statefunApp.NexmarkConfiguration;
 import generator.GeneratorConfig;
 import generator.model.BidGenerator;
 import model.Bid;
-import org.apache.commons.math3.distribution.ParetoDistribution;
+import generator.ParetoGenerator;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.typeinfo.TypeHint;
@@ -194,7 +194,7 @@ public class KeyedHighestBidCount {
                         this.outputCollection = new HashMap<>();
                         if(generatorConfig.popularKeyInterval != null) {
                             this.config.popularKeyInterval = generatorConfig.popularKeyInterval;
-                            this.config.paretoDistribution = new ParetoDistribution(1, generatorConfig.paretoScale);
+                            this.config.paretoGenerator = new ParetoGenerator(1, generatorConfig.paretoScale, config);
                             this.config.numKeys = generatorConfig.numKeys;
                             this.config.bufferPerKey = generatorConfig.bufferPerKey;
                         }
@@ -205,7 +205,7 @@ public class KeyedHighestBidCount {
                     public void flatMap(InternalTypedSourceObject input, Collector<Tuple2<String, Object>> collector) throws Exception {
                         FunctionInvocation invocation  = (FunctionInvocation)input;
                         Object o = invocation.messageWrapper;
-                        System.out.println("flatmap item " + input + " tid " + Thread.currentThread().getName());
+                        //System.out.println("flatmap item " + input + " tid " + Thread.currentThread().getName());
                         if(o instanceof Long){
                             Long ts = (long)o;
                             for (int i = 0; i < batchSize; i++){
@@ -350,7 +350,7 @@ public class KeyedHighestBidCount {
                         ArrayList<Bid> inputList = null;
                         if(o.f1 instanceof ArrayList){
                             inputList = (ArrayList<Bid>) o.f1;
-                            System.out.println("Receiving regular data " + (inputList == null?"null":inputList.size()) + " key " +  Math.floorMod(inputList.get(0).auction, generatorConfig.numKeys) + " id " + o.f0 + " tid: " + Thread.currentThread().getName());
+                            //System.out.println("Receiving regular data " + (inputList == null?"null":inputList.size()) + " key " +  Math.floorMod(inputList.get(0).auction, generatorConfig.numKeys) + " id " + o.f0 + " tid: " + Thread.currentThread().getName());
                         }
                         else if(o.f1 instanceof Tuple2){
                             inputList = ((Tuple2<Long, ArrayList<Bid>>)(o.f1)).f1;
@@ -381,6 +381,8 @@ public class KeyedHighestBidCount {
                             // System.out.println("Receiving item with size post " + ((ArrayList<Bid>)o.f1).size() + " total " + count + " keygroup " + o.f0 + " tail " + ((ArrayList<Bid>)o.f1).get(((ArrayList<Bid>)o.f1).size() - 1).dateTime + " tid: " + Thread.currentThread().getName());
                             Tuple4<Long, HashMap<Long, Bid>, Integer, String> ret =  new Tuple4<>(highestTS, accMap, count, o.f0);
                             //System.out.println("Current highest " + ret);
+                            //System.out.println("Receiving regular event " + highestTS/finalWindowSize + " keygroup " + Math.floorMod(inputList.get(0).auction, generatorConfig.numKeys) + " size " + inputList.size() 
+                                    // + " time " + System.currentTimeMillis() + " at tid: " + Thread.currentThread().getName());
                             return ret;
                         }
                         return acc;
